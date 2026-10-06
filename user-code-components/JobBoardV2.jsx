@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from "react"
 import { addPropertyControls, ControlType } from "framer"
-import { Search, Plus, Minus, Loader2 } from "lucide-react"
+import { Search, Plus, Minus } from "lucide-react"
 
-const fallbackJobListings = [
+const defaultJobs = [
     {
         id: 1,
         title: "PROJECT MANAGER (M/F) | Barqueiros",
@@ -47,40 +47,8 @@ const fallbackJobListings = [
     },
 ]
 
-// Normalization function to handle Strapi v4 (item.attributes), Strapi v5, or flat JSON APIs
-const parseStrapiJobItem = (item, index) => {
-    if (!item) return null
-    const attrs = item.attributes ? item.attributes : item
-
-    return {
-        id: item.id || attrs.id || index + 1,
-        title:
-            attrs.title ||
-            attrs.Title ||
-            attrs.name ||
-            attrs.Name ||
-            attrs.job_title ||
-            "Untitled Position",
-        description:
-            attrs.description ||
-            attrs.Description ||
-            attrs.summary ||
-            attrs.Summary ||
-            attrs.details ||
-            "",
-        applyUrl:
-            attrs.applyUrl ||
-            attrs.apply_url ||
-            attrs.link ||
-            attrs.url ||
-            "#",
-    }
-}
-
-export default function JobBoard({
-    strapiUrl = "https://hr.impetusgroup.pt/api/jobs",
-    apiToken = "",
-    useFallbackOnFailure = true,
+export default function JobBoardV2({
+    jobListings = defaultJobs,
     headingText = "Check our Open Positions.",
     headingFontSize = 48,
     headingFontWeight = 800,
@@ -96,10 +64,6 @@ export default function JobBoard({
     widthUnit = "rem",
     widthValue = 56,
 }) {
-    const [jobs, setJobs] = useState(fallbackJobListings)
-    const [isLoading, setIsLoading] = useState(false)
-    const [fetchError, setFetchError] = useState(null)
-
     const [searchQuery, setSearchQuery] = useState("")
     const [expandedJobId, setExpandedJobId] = useState(null)
     const [isInputFocused, setIsInputFocused] = useState(false)
@@ -119,69 +83,19 @@ export default function JobBoard({
         }
     }, [])
 
-    // Fetch jobs from Strapi CMS API
-    useEffect(() => {
-        if (!strapiUrl || strapiUrl.trim() === "") {
-            setJobs(useFallbackOnFailure ? fallbackJobListings : [])
-            setIsLoading(false)
-            return
-        }
+    // Ensure jobListings is an array
+    const rawJobs =
+        Array.isArray(jobListings) && jobListings.length > 0
+            ? jobListings
+            : defaultJobs
 
-        let isMounted = true
-        setIsLoading(true)
-        setFetchError(null)
-
-        const headers = {
-            "Content-Type": "application/json",
-        }
-        if (apiToken && apiToken.trim() !== "") {
-            headers["Authorization"] = `Bearer ${apiToken.trim()}`
-        }
-
-        fetch(strapiUrl.trim(), { headers })
-            .then((res) => {
-                if (!res.ok) {
-                    throw new Error(`HTTP ${res.status}: ${res.statusText}`)
-                }
-                return res.json()
-            })
-            .then((data) => {
-                if (!isMounted) return
-                const rawList = Array.isArray(data)
-                    ? data
-                    : Array.isArray(data?.data)
-                    ? data.data
-                    : []
-
-                const parsed = rawList
-                    .map((item, idx) => parseStrapiJobItem(item, idx))
-                    .filter(Boolean)
-
-                if (parsed.length > 0) {
-                    setJobs(parsed)
-                } else if (useFallbackOnFailure) {
-                    setJobs(fallbackJobListings)
-                } else {
-                    setJobs([])
-                }
-                setIsLoading(false)
-            })
-            .catch((err) => {
-                if (!isMounted) return
-                console.warn("Strapi API Fetch Error:", err)
-                setFetchError(err.message)
-                if (useFallbackOnFailure) {
-                    setJobs(fallbackJobListings)
-                } else {
-                    setJobs([])
-                }
-                setIsLoading(false)
-            })
-
-        return () => {
-            isMounted = false
-        }
-    }, [strapiUrl, apiToken, useFallbackOnFailure])
+    // Normalize items with fallback keys
+    const jobs = rawJobs.map((job, idx) => ({
+        id: job.id || idx + 1,
+        title: job.title || "Untitled Position",
+        description: job.description || "",
+        applyUrl: job.applyUrl || "#",
+    }))
 
     // Determine font family stack based on backoffice property controls
     let computedFontFamily = 'inherit, "Montserrat", "Inter", sans-serif'
@@ -221,6 +135,7 @@ export default function JobBoard({
                 backgroundColor: "#ffffff",
                 color: "#000000",
                 fontFamily: computedFontFamily,
+
                 paddingLeft: "16px",
                 paddingRight: "16px",
                 paddingTop: "64px",
@@ -333,35 +248,7 @@ export default function JobBoard({
                         borderTop: "1px solid #d1d5db",
                     }}
                 >
-                    {isLoading ? (
-                        <div
-                            style={{
-                                paddingTop: "48px",
-                                paddingBottom: "48px",
-                                textAlign: "center",
-                                color: "#6b7280",
-                                display: "flex",
-                                flexDirection: "column",
-                                alignItems: "center",
-                                gap: "12px",
-                            }}
-                        >
-                            <Loader2
-                                style={{
-                                    width: "24px",
-                                    height: "24px",
-                                    animation: "spin 1s linear infinite",
-                                }}
-                            />
-                            <span>Loading open positions...</span>
-                            <style>{`
-                                @keyframes spin {
-                                    from { transform: rotate(0deg); }
-                                    to { transform: rotate(360deg); }
-                                }
-                            `}</style>
-                        </div>
-                    ) : filteredJobs.length > 0 ? (
+                    {filteredJobs.length > 0 ? (
                         filteredJobs.map((job) => {
                             const isExpanded = expandedJobId === job.id
                             const isHeaderHovered = hoveredJobId === job.id
@@ -544,22 +431,35 @@ export default function JobBoard({
     )
 }
 
-addPropertyControls(JobBoard, {
-    // Configurações do Strapi CMS API
-    strapiUrl: {
-        type: ControlType.String,
-        title: "Strapi API Endpoint",
-        defaultValue: "https://hr.impetusgroup.pt/api/jobs",
-    },
-    apiToken: {
-        type: ControlType.String,
-        title: "API Token (Optional)",
-        defaultValue: "",
-    },
-    useFallbackOnFailure: {
-        type: ControlType.Boolean,
-        title: "Fallback Sample Data",
-        defaultValue: true,
+addPropertyControls(JobBoardV2, {
+    // Gestão das Vagas no Backoffice do Framer
+    jobListings: {
+        type: ControlType.Array,
+        title: "Job Listings",
+        control: {
+            type: ControlType.Object,
+            title: "Job Position",
+            controls: {
+                title: {
+                    type: ControlType.String,
+                    title: "Title",
+                    defaultValue: "PROJECT MANAGER (M/F) | Barqueiros",
+                },
+                description: {
+                    type: ControlType.String,
+                    title: "Description",
+                    displayTextArea: true,
+                    defaultValue:
+                        "We are looking for an experienced Project Manager to lead our dynamic team. You will be responsible for planning, overseeing, and leading projects from ideation through to completion.",
+                },
+                applyUrl: {
+                    type: ControlType.String,
+                    title: "Apply Link",
+                    defaultValue: "#",
+                },
+            },
+        },
+        defaultValue: defaultJobs,
     },
 
     // Controlos do Título Principal (Heading)
