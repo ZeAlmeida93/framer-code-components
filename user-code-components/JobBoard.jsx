@@ -48,6 +48,7 @@ const fallbackJobListings = [
 ]
 
 // Normalization function to handle Strapi v4 (item.attributes), Strapi v5, or flat JSON APIs
+// Description is kept as-is (may be a Rich Text block array or a plain string)
 const parseStrapiJobItem = (item, index) => {
     if (!item) return null
     const attrs = item.attributes ? item.attributes : item
@@ -61,12 +62,13 @@ const parseStrapiJobItem = (item, index) => {
             attrs.Name ||
             attrs.job_title ||
             "Untitled Position",
+        // Preserve raw value — may be a Strapi Blocks array OR a plain string
         description:
-            attrs.description ||
-            attrs.Description ||
-            attrs.summary ||
-            attrs.Summary ||
-            attrs.details ||
+            attrs.description ??
+            attrs.Description ??
+            attrs.summary ??
+            attrs.Summary ??
+            attrs.details ??
             "",
         applyUrl:
             attrs.applyUrl ||
@@ -74,6 +76,159 @@ const parseStrapiJobItem = (item, index) => {
             attrs.link ||
             attrs.url ||
             "#",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strapi Rich Text (Blocks editor) renderer
+// Handles: paragraph, heading, list, list-item, quote, code, text (with marks)
+// Falls back gracefully for plain strings or unknown node types
+// ---------------------------------------------------------------------------
+
+const renderStrapiTextNode = (node, idx) => {
+    if (!node) return null
+    if (typeof node === "string") return node
+
+    const { type, text, bold, italic, underline, strikethrough, code, children } = node
+
+    if (type === "text" || text !== undefined) {
+        let el = text || ""
+        // Apply inline marks
+        if (code) el = <code key={idx} style={{ fontFamily: "monospace", backgroundColor: "#f3f4f6", padding: "1px 4px", borderRadius: "3px", fontSize: "0.9em" }}>{el}</code>
+        if (bold) el = <strong key={idx}>{el}</strong>
+        if (italic) el = <em key={idx}>{el}</em>
+        if (underline) el = <u key={idx}>{el}</u>
+        if (strikethrough) el = <s key={idx}>{el}</s>
+        return <React.Fragment key={idx}>{el}</React.Fragment>
+    }
+
+    // Recursive children rendering
+    const renderedChildren = Array.isArray(children)
+        ? children.map((child, i) => renderStrapiTextNode(child, i))
+        : null
+
+    if (type === "link") {
+        const href = node.url || "#"
+        return (
+            <a key={idx} href={href} target="_blank" rel="noopener noreferrer"
+                style={{ color: "inherit", textDecoration: "underline" }}>
+                {renderedChildren}
+            </a>
+        )
+    }
+
+    return <React.Fragment key={idx}>{renderedChildren}</React.Fragment>
+}
+
+const renderStrapiBlocks = (blocks, baseStyle) => {
+    if (!blocks) return null
+
+    // Plain string fallback
+    if (typeof blocks === "string") {
+        return (
+            <p style={{ ...baseStyle, marginTop: 0, marginBottom: "0.75em", whiteSpace: "pre-wrap" }}>
+                {blocks}
+            </p>
+        )
+    }
+
+    // HTML string fallback (shouldn't happen with modern Strapi, but just in case)
+    if (typeof blocks === "string" && blocks.trim().startsWith("<")) {
+        return <div style={baseStyle} dangerouslySetInnerHTML={{ __html: blocks }} />
+    }
+
+    if (!Array.isArray(blocks)) return null
+
+    return blocks.map((block, idx) => {
+        const children = Array.isArray(block.children)
+            ? block.children.map((child, i) => renderStrapiTextNode(child, i))
+            : null
+
+        switch (block.type) {
+            case "paragraph":
+                return (
+                    <p key={idx} style={{ ...baseStyle, marginTop: 0, marginBottom: "0.75em" }}>
+                        {children}
+                    </p>
+                )
+
+            case "heading": {
+                const level = block.level || 2
+                const Tag = `h${Math.min(Math.max(level, 1), 6)}`
+                const headingSizes = { 1: "1.5em", 2: "1.3em", 3: "1.1em", 4: "1em", 5: "0.95em", 6: "0.9em" }
+                return (
+                    <Tag key={idx} style={{ ...baseStyle, fontWeight: 700, fontSize: headingSizes[level] || "1.1em", marginTop: idx === 0 ? 0 : "1em", marginBottom: "0.4em" }}>
+                        {children}
+                    </Tag>
+                )
+            }
+
+            case "list": {
+                const ListTag = block.format === "ordered" ? "ol" : "ul"
+                const listItems = Array.isArray(block.children)
+                    ? block.children.map((li, liIdx) => {
+                        const liChildren = Array.isArray(li.children)
+                            ? li.children.map((child, i) => renderStrapiTextNode(child, i))
+                            : null
+                        return (
+                            <li key={liIdx} style={{ marginBottom: "0.25em" }}>
+                                {liChildren}
+                            </li>
+                        )
+                    })
+                    : null
+                return (
+                    <ListTag key={idx} style={{ ...baseStyle, paddingLeft: "1.5em", marginTop: 0, marginBottom: "0.75em" }}>
+                        {listItems}
+                    </ListTag>
+                )
+            }
+
+            case "quote":
+                return (
+                    <blockquote key={idx} style={{ ...baseStyle, borderLeft: "3px solid #d1d5db", paddingLeft: "1em", marginLeft: 0, marginTop: 0, marginBottom: "0.75em", color: "#6b7280", fontStyle: "italic" }}>
+                        {children}
+                    </blockquote>
+                )
+
+            case "code":
+                return (
+                    <pre key={idx} style={{ backgroundColor: "#f3f4f6", padding: "12px", borderRadius: "6px", overflowX: "auto", marginTop: 0, marginBottom: "0.75em", fontSize: "0.875em" }}>
+                        <code style={{ fontFamily: "monospace", color: "#1f2937" }}>
+                            {children}
+                        </code>
+                    </pre>
+                )
+
+            case "image":
+                if (block.image && block.image.url) {
+                    return (
+                        <img key={idx} src={block.image.url} alt={block.image.alternativeText || ""}
+                            style={{ maxWidth: "100%", borderRadius: "6px", marginBottom: "0.75em" }} />
+                    )
+                }
+                return null
+
+            default:
+                // Unknown block type: render children as a paragraph
+                return children ? (
+                    <p key={idx} style={{ ...baseStyle, marginTop: 0, marginBottom: "0.75em" }}>
+                        {children}
+                    </p>
+                ) : null
+        }
+    })
+}
+
+// Safe wrapper component to prevent render errors bubbling up
+const RichTextDescription = ({ description, style }) => {
+    try {
+        const content = renderStrapiBlocks(description, style)
+        return <div style={{ marginTop: 0, marginBottom: 0 }}>{content}</div>
+    } catch (err) {
+        // Last-resort fallback: render as plain text
+        const text = typeof description === "string" ? description : ""
+        return <p style={{ ...style, marginTop: 0, marginBottom: 0 }}>{text}</p>
     }
 }
 
@@ -150,8 +305,8 @@ export default function JobBoard({
                 const rawList = Array.isArray(data)
                     ? data
                     : Array.isArray(data?.data)
-                    ? data.data
-                    : []
+                        ? data.data
+                        : []
 
                 const parsed = rawList
                     .map((item, idx) => parseStrapiJobItem(item, idx))
@@ -456,7 +611,7 @@ export default function JobBoard({
                                         style={{
                                             overflow: "hidden",
                                             maxHeight: isExpanded
-                                                ? "600px"
+                                                ? "fit-content"
                                                 : "0px",
                                             opacity: isExpanded ? 1 : 0,
                                             paddingBottom: isExpanded
@@ -466,26 +621,23 @@ export default function JobBoard({
                                                 "max-height 0.3s ease-in-out, opacity 0.3s ease-in-out, padding 0.3s ease-in-out",
                                         }}
                                     >
-                                        <p
+                                        <RichTextDescription
+                                            description={job.description}
                                             style={{
                                                 fontSize: `${jobDescFontSize}px`,
                                                 fontWeight: jobDescFontWeight,
                                                 color: "#4b5563",
                                                 lineHeight: 1.625,
                                                 paddingRight: "56px",
-                                                marginTop: 0,
-                                                marginBottom: 0,
                                             }}
-                                        >
-                                            {job.description}
-                                        </p>
+                                        />
 
                                         {/* Apply Button */}
                                         <a
                                             href={job.applyUrl || "#"}
                                             target={
                                                 job.applyUrl &&
-                                                job.applyUrl !== "#"
+                                                    job.applyUrl !== "#"
                                                     ? "_blank"
                                                     : "_self"
                                             }
