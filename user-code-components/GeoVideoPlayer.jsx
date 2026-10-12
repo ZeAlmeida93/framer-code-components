@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react"
+import React, { useState, useEffect, useRef, useCallback } from "react"
 import { addPropertyControls, ControlType } from "framer"
 
 /**
@@ -11,6 +11,8 @@ import { addPropertyControls, ControlType } from "framer"
  * - Sem classes Tailwind CSS.
  * - Estilos 100% em linha com 'fontFamily: inherit' para máxima performance e prevenção do Error Code 5.
  * - Inicia com o vídeo Global e atualiza assim que o país for detetado.
+ * - Força o Autoplay a qualquer custo: tenta com som; se o browser bloquear,
+ *   reproduz imediatamente em silêncio e ativa o som na 1ª interação do utilizador.
  */
 
 const styles = {
@@ -63,6 +65,29 @@ const styles = {
         fontSize: "13px",
         fontFamily: "inherit",
     },
+    unmuteButton: {
+        position: "absolute",
+        bottom: "16px",
+        left: "16px",
+        zIndex: 10,
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+        backgroundColor: "rgba(0, 0, 0, 0.75)",
+        color: "#ffffff",
+        border: "1px solid rgba(255, 255, 255, 0.25)",
+        borderRadius: "24px",
+        padding: "8px 16px",
+        fontSize: "13px",
+        fontWeight: 600,
+        cursor: "pointer",
+        backdropFilter: "blur(8px)",
+        WebkitBackdropFilter: "blur(8px)",
+        boxShadow: "0 4px 12px rgba(0, 0, 0, 0.35)",
+        fontFamily: "inherit",
+        userSelect: "none",
+        outline: "none",
+    },
 }
 
 export default function GeoVideoPlayer({
@@ -73,8 +98,11 @@ export default function GeoVideoPlayer({
     videoDE = "",
     videoDK = "",
     autoPlay = true,
+    forceAutoplay = true,
     loop = true,
-    muted = true,
+    muted = false,
+    unmuteOnInteraction = true,
+    showUnmuteButton = true,
     controls = false,
     objectFit = "cover",
     borderRadius = 0,
@@ -83,8 +111,13 @@ export default function GeoVideoPlayer({
     style,
     ...restProps
 }) {
+    const videoRef = useRef(null)
+
     // Estado com o código de país extraído do IP (ex: "PT", "ES", "FR", "DE", "DK")
     const [countryCode, setCountryCode] = useState(null)
+
+    // Indica se o áudio foi silenciado preventivamente devido à política de autoplay do navegador
+    const [isAudioBlocked, setIsAudioBlocked] = useState(false)
 
     // Efeito para detetar a localização através do Cloudflare trace
     useEffect(() => {
@@ -156,9 +189,109 @@ export default function GeoVideoPlayer({
         activeVideoUrl = videoDK.trim()
     }
 
+    // Função para forçar o autoplay a qualquer custo
+    const triggerAutoplay = useCallback(() => {
+        const video = videoRef.current
+        if (!video || !autoPlay) return
+
+        // Atributos vitais para WebKit / iOS / Safari / Chrome
+        video.playsInline = true
+        video.setAttribute("playsinline", "")
+        video.setAttribute("webkit-playsinline", "")
+
+        // Se o utilizador configurou explicitamente para começar silenciado
+        if (muted) {
+            video.muted = true
+            video.defaultMuted = true
+            const playPromise = video.play()
+            if (playPromise !== undefined && typeof playPromise.catch === "function") {
+                playPromise.catch((err) => {
+                    console.warn("GeoVideoPlayer: Falha na reprodução com muted:", err)
+                })
+            }
+            return
+        }
+
+        // TENTATIVA 1: Reproduzir COM SOM
+        video.muted = false
+        video.defaultMuted = false
+
+        const playPromise = video.play()
+        if (playPromise !== undefined && typeof playPromise.catch === "function") {
+            playPromise
+                .then(() => {
+                    // Browser autorizou reprodução com som!
+                    setIsAudioBlocked(false)
+                })
+                .catch(() => {
+                    // TENTATIVA 2: O browser bloqueou o som.
+                    // FORÇAR A QUALQUER CUSTO: mutar e reproduzir imediatamente!
+                    setIsAudioBlocked(true)
+                    video.muted = true
+                    video.defaultMuted = true
+                    const fallbackPromise = video.play()
+                    if (fallbackPromise !== undefined && typeof fallbackPromise.catch === "function") {
+                        fallbackPromise.catch((fallbackErr) => {
+                            console.warn("GeoVideoPlayer: Falha no fallback autoplay:", fallbackErr)
+                        })
+                    }
+                })
+        }
+    }, [autoPlay, muted])
+
+    // Desmutar e ativar som imediatamente
+    const unmuteAudio = useCallback(() => {
+        const video = videoRef.current
+        if (!video) return
+        video.muted = false
+        video.defaultMuted = false
+        const playPromise = video.play()
+        if (playPromise !== undefined && typeof playPromise.catch === "function") {
+            playPromise.catch(() => {})
+        }
+        setIsAudioBlocked(false)
+    }, [])
+
+    // Dispara a tentativa de reprodução quando o URL do vídeo muda
+    useEffect(() => {
+        triggerAutoplay()
+    }, [activeVideoUrl, triggerAutoplay])
+
+    // Ativa o som no primeiro gesto do utilizador (clique, toque ou tecla em qualquer lugar da página)
+    useEffect(() => {
+        if (muted || !unmuteOnInteraction || !isAudioBlocked) return
+
+        const handleInteraction = () => {
+            unmuteAudio()
+        }
+
+        const events = ["pointerdown", "touchstart", "click", "keydown"]
+        events.forEach((evt) => {
+            window.addEventListener(evt, handleInteraction, { once: true, passive: true })
+        })
+
+        return () => {
+            events.forEach((evt) => {
+                window.removeEventListener(evt, handleInteraction)
+            })
+        }
+    }, [muted, unmuteOnInteraction, isAudioBlocked, unmuteAudio])
+
+    // Callback ref para garantir execução imediata assim que o nó do vídeo é montado no DOM
+    const handleVideoRef = useCallback((node) => {
+        videoRef.current = node
+        if (node && autoPlay) {
+            node.playsInline = true
+            node.setAttribute("playsinline", "")
+            node.setAttribute("webkit-playsinline", "")
+            triggerAutoplay()
+        }
+    }, [autoPlay, triggerAutoplay])
+
     const containerStyle = {
         ...styles.container,
         borderRadius: borderRadius ? `${borderRadius}px` : "0px",
+        cursor: isAudioBlocked && !muted ? "pointer" : "default",
         ...style,
     }
 
@@ -168,19 +301,64 @@ export default function GeoVideoPlayer({
     }
 
     return (
-        <div style={containerStyle} {...restProps}>
+        <div
+            style={containerStyle}
+            onClick={() => {
+                if (isAudioBlocked && !muted) {
+                    unmuteAudio()
+                }
+            }}
+            {...restProps}
+        >
             {activeVideoUrl ? (
-                <video
-                    key={activeVideoUrl}
-                    src={activeVideoUrl}
-                    poster={posterUrl || undefined}
-                    autoPlay={autoPlay}
-                    loop={loop}
-                    muted={muted}
-                    controls={controls}
-                    playsInline
-                    style={videoElementStyle}
-                />
+                <>
+                    <video
+                        ref={handleVideoRef}
+                        key={activeVideoUrl}
+                        src={activeVideoUrl}
+                        poster={posterUrl || undefined}
+                        autoPlay={autoPlay}
+                        loop={loop}
+                        muted={muted}
+                        controls={controls}
+                        playsInline
+                        onCanPlay={triggerAutoplay}
+                        onLoadedData={triggerAutoplay}
+                        onLoadedMetadata={triggerAutoplay}
+                        style={videoElementStyle}
+                    />
+
+                    {/* Botão de desbloqueio de som se o browser forçou o silêncio inicial */}
+                    {isAudioBlocked && !muted && showUnmuteButton && (
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation()
+                                unmuteAudio()
+                            }}
+                            style={styles.unmuteButton}
+                            aria-label="Ativar Som"
+                            title="Clique para ativar o som do vídeo"
+                        >
+                            <svg
+                                width="16"
+                                height="16"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                style={{ display: "block", flexShrink: 0 }}
+                            >
+                                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                                <line x1="23" y1="9" x2="17" y2="15" />
+                                <line x1="17" y1="9" x2="23" y2="15" />
+                            </svg>
+                            <span>Ativar Som</span>
+                        </button>
+                    )}
+                </>
             ) : (
                 <div style={styles.placeholder}>
                     <p style={styles.placeholderTitle}>Nenhum Vídeo Configurado</p>
@@ -238,24 +416,36 @@ addPropertyControls(GeoVideoPlayer, {
         placeholder: "https://exemplo.com/video-dinamarca.mp4",
     },
 
-    // 2. Controlos de Reprodução
+    // 2. Controlos de Reprodução e Autoplay Agressivo
     autoPlay: {
         type: ControlType.Boolean,
-        title: "Autoplay",
+        title: "Forçar Autoplay",
         defaultValue: true,
-        description: "Reproduz automaticamente quando carregado (requer Muted ativado nos browsers).",
+        description: "Força a reprodução automática a qualquer custo (tenta com som; se o browser bloquear, reproduz silenciado).",
+    },
+    muted: {
+        type: ControlType.Boolean,
+        title: "Sem Som Inicial",
+        defaultValue: false,
+        description: "Se desmarcado, tenta tocar com som. Se o browser bloquear, inicia mudo e ativa o som na 1ª interação.",
+    },
+    unmuteOnInteraction: {
+        type: ControlType.Boolean,
+        title: "Som na 1ª Interação",
+        defaultValue: true,
+        description: "Desbloqueia e ativa o som assim que o utilizador clica ou toca em qualquer local da página.",
+    },
+    showUnmuteButton: {
+        type: ControlType.Boolean,
+        title: "Botão 'Ativar Som'",
+        defaultValue: true,
+        description: "Apresenta um botão flutuante para ativar o som quando o navegador bloqueou o áudio inicial.",
     },
     loop: {
         type: ControlType.Boolean,
         title: "Loop",
         defaultValue: true,
         description: "Repete o vídeo continuamente.",
-    },
-    muted: {
-        type: ControlType.Boolean,
-        title: "Sem Som (Muted)",
-        defaultValue: true,
-        description: "Necessário para autoplay na maioria dos browsers.",
     },
     controls: {
         type: ControlType.Boolean,
