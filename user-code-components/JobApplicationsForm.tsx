@@ -427,7 +427,8 @@ export default function JobApplicationsForm({
         return true
     }
 
-    // Submissão do formulário para o Strapi v4/v5 via multipart/form-data
+    // Submissão do formulário para o Strapi v4/v5 em 2 passos (upload do ficheiro seguido de criação da candidatura)
+    // Este método resolve o bloqueio de CORS gerado pelo Microsoft-IIS em pedidos multipart em endpoints de coleção
     const handleSubmit = async (e?: React.FormEvent | React.MouseEvent) => {
         if (e && typeof e.preventDefault === "function") {
             e.preventDefault()
@@ -445,13 +446,48 @@ export default function JobApplicationsForm({
 
         try {
             const cleanBaseUrl = sanitizeStrapiUrl(strapiUrl)
-            const endpoint = `${cleanBaseUrl}/api/candidaturas`
 
-            console.log("[JobApplications-Form] A submeter para:", endpoint)
+            // PASSO 1: Upload do ficheiro CV para o endpoint dedicado /api/upload
+            let uploadedFileId: number | string | null = null
 
-            const formDataPayload = new FormData()
+            if (cvFile) {
+                console.log("[JobApplications-Form] Passo 1: A carregar CV para", `${cleanBaseUrl}/api/upload`)
+                const uploadFormData = new FormData()
+                uploadFormData.append("files", cvFile)
 
-            // Serialização do objeto data conforme documentação oficial do Strapi
+                const uploadHeaders: Record<string, string> = {
+                    Accept: "application/json",
+                }
+                if (apiToken && apiToken.trim() !== "") {
+                    uploadHeaders["Authorization"] = `Bearer ${apiToken.trim()}`
+                }
+
+                const uploadRes = await fetch(`${cleanBaseUrl}/api/upload`, {
+                    method: "POST",
+                    headers: uploadHeaders,
+                    body: uploadFormData,
+                })
+
+                if (!uploadRes.ok) {
+                    let uploadErr = `Falha no upload do CV (${uploadRes.status} ${uploadRes.statusText})`
+                    try {
+                        const errJson = await uploadRes.json()
+                        if (errJson?.error?.message) uploadErr = errJson.error.message
+                    } catch (_) {}
+                    throw new Error(uploadErr)
+                }
+
+                const uploadData = await uploadRes.json()
+                const fileItem = Array.isArray(uploadData) ? uploadData[0] : uploadData
+                uploadedFileId = fileItem?.id || fileItem?.documentId || null
+                console.log("[JobApplications-Form] Passo 1 concluído com sucesso. ID do CV no Strapi:", uploadedFileId)
+            }
+
+            if (!uploadedFileId) {
+                throw new Error("Não foi possível carregar o ficheiro do CV para o servidor.")
+            }
+
+            // PASSO 2: Criar a candidatura com os dados em JSON e o ID do ficheiro CV
             const candidaturasData: Record<string, any> = {
                 Nome: formState.Nome.trim(),
                 Email: formState.Email.trim(),
@@ -460,42 +496,70 @@ export default function JobApplicationsForm({
                 Morada2: formState.Morada2.trim() || undefined,
                 CodigoPostal: formState.CodigoPostal.trim() || undefined,
                 HabilitacoesAcademicas: formState.HabilitacoesAcademicas || undefined,
-                Obs: formState.Obs.trim() || undefined,
+                CV: uploadedFileId,
             }
 
-            // Associação da vaga (id numérico ou string correspondente)
+            // Associar vaga e salvaguardar no campo Obs
+            let finalObs = formState.Obs.trim()
             if (formState.vagas && formState.vagas !== "" && formState.vagas !== "spontaneous") {
                 const numericVagaId = Number(formState.vagas)
-                candidaturasData.vagas = isNaN(numericVagaId)
-                    ? formState.vagas
-                    : numericVagaId
+                const vagaVal = isNaN(numericVagaId) ? formState.vagas : numericVagaId
+                candidaturasData.Vagas = vagaVal
+
+                const foundVaga = vagas.find((v) => String(v.id) === String(formState.vagas))
+                const vagaLabel = foundVaga ? foundVaga.title : `Vaga #${formState.vagas}`
+                finalObs = finalObs
+                    ? `[Vaga Pretendida: ${vagaLabel}]\n\n${finalObs}`
+                    : `[Vaga Pretendida: ${vagaLabel}]`
+            } else if (formState.vagas === "spontaneous") {
+                finalObs = finalObs ? `[Candidatura Espontânea]\n\n${finalObs}` : `[Candidatura Espontânea]`
             }
 
-            formDataPayload.append("data", JSON.stringify(candidaturasData))
-
-            if (cvFile) {
-                formDataPayload.append("files.CV", cvFile)
-                console.log("[JobApplications-Form] Ficheiro CV anexado:", cvFile.name, `(${cvFile.size} bytes)`)
+            if (finalObs) {
+                candidaturasData.Obs = finalObs
             }
 
-            const headers: Record<string, string> = {
+            const candidaturasEndpoint = `${cleanBaseUrl}/api/candidaturas`
+            console.log("[JobApplications-Form] Passo 2: A registar candidatura em", candidaturasEndpoint, candidaturasData)
+
+            const candidaturasHeaders: Record<string, string> = {
+                "Content-Type": "application/json",
                 Accept: "application/json",
             }
             if (apiToken && apiToken.trim() !== "") {
-                headers["Authorization"] = `Bearer ${apiToken.trim()}`
+                candidaturasHeaders["Authorization"] = `Bearer ${apiToken.trim()}`
             }
 
-            console.log("[JobApplications-Form] Headers configurados:", {
-                Accept: headers.Accept,
-                hasAuthorization: !!headers["Authorization"],
+            let response = await fetch(candidaturasEndpoint, {
+                method: "POST",
+                headers: candidaturasHeaders,
+                body: JSON.stringify({ data: candidaturasData }),
             })
 
-            // Nota: Não definir Content-Type manualmente para o browser gerar o boundary multipart
-            const response = await fetch(endpoint, {
-                method: "POST",
-                headers,
-                body: formDataPayload,
-            })
+            // Se o schema do Strapi não aceitar a chave 'Vagas', tentar novamente sem ela (o dado já está gravado em Obs)
+            if (!response.ok && candidaturasData.Vagas) {
+                let isInvalidKey = false
+                try {
+                    const clone = response.clone()
+                    const errData = await clone.json()
+                    if (
+                        errData?.error?.message?.includes("Invalid key") ||
+                        errData?.error?.name === "ValidationError"
+                    ) {
+                        isInvalidKey = true
+                    }
+                } catch (_) {}
+
+                if (isInvalidKey) {
+                    console.warn("[JobApplications-Form] A tentar envio sem campo Vagas no objeto JSON...")
+                    delete candidaturasData.Vagas
+                    response = await fetch(candidaturasEndpoint, {
+                        method: "POST",
+                        headers: candidaturasHeaders,
+                        body: JSON.stringify({ data: candidaturasData }),
+                    })
+                }
+            }
 
             console.log("[JobApplications-Form] Resposta HTTP recebida:", response.status, response.statusText)
 
