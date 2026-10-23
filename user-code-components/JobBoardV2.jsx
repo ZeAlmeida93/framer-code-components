@@ -372,17 +372,42 @@ export default function JobBoardV2({
                                             href={job.applyUrl || "#"}
                                             target={
                                                 job.applyUrl &&
-                                                job.applyUrl !== "#"
+                                                job.applyUrl !== "#" &&
+                                                !job.applyUrl.startsWith("#candidatura") &&
+                                                !job.applyUrl.startsWith("#apply")
                                                     ? "_blank"
                                                     : "_self"
                                             }
                                             rel="noopener noreferrer"
+                                            data-open-job-modal="true"
+                                            data-vaga-id={job.id}
+                                            data-vaga-title={job.title}
                                             onMouseEnter={() =>
                                                 setHoveredApplyId(job.id)
                                             }
                                             onMouseLeave={() =>
                                                 setHoveredApplyId(null)
                                             }
+                                            onClick={(e) => {
+                                                if (
+                                                    !job.applyUrl ||
+                                                    job.applyUrl === "#" ||
+                                                    job.applyUrl.startsWith("#candidatura") ||
+                                                    job.applyUrl.startsWith("#apply")
+                                                ) {
+                                                    e.preventDefault()
+                                                    if (typeof window !== "undefined") {
+                                                        window.dispatchEvent(
+                                                            new CustomEvent("open-job-modal", {
+                                                                detail: {
+                                                                    vagaId: job.id,
+                                                                    vagaTitle: job.title,
+                                                                },
+                                                            })
+                                                        )
+                                                    }
+                                                }
+                                            }}
                                             style={{
                                                 fontFamily: "inherit",
                                                 fontSize: `${buttonFontSize}px`,

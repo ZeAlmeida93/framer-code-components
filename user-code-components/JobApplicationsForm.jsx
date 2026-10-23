@@ -46,6 +46,7 @@ const parseStrapiVagas = (responseData) => {
             if (!item) return null
             const attrs = item.attributes ? item.attributes : item
             const id = item.id ?? attrs.id ?? idx + 1
+            const documentId = item.documentId || attrs.documentId || (typeof id === "string" ? id : undefined)
             const title =
                 attrs.title ||
                 attrs.Title ||
@@ -58,7 +59,7 @@ const parseStrapiVagas = (responseData) => {
                 attrs.job_title ||
                 `Vaga #${id}`
 
-            return { id, title }
+            return { id, documentId, title }
         })
         .filter(Boolean)
 }
@@ -100,7 +101,9 @@ export default function JobApplicationsForm({
     strapiUrl = "https://hr.impetusgroup.pt",
     apiToken = "",
     buttonText = "Candidatar-me",
+    showTriggerButton = true,
     previewOpen = false,
+    modalMaxWidth = 880,
     modalTitle = "Candidatura de Emprego",
     modalSubtitle = "Junte-se à equipa do Grupo Impetus. Preencha os seus dados e anexe o seu CV.",
     submitButtonText = "Submeter Candidatura",
@@ -199,12 +202,22 @@ export default function JobApplicationsForm({
         }
     }, [strapiUrl, apiToken])
 
-    // Bloquear scroll do body quando o modal está aberto e lidar com tecla ESC
+    // Bloquear scroll do background (body + html) enquanto o modal estiver aberto e lidar com tecla ESC
     useEffect(() => {
         if (!isModalActive) return
 
-        const originalOverflow = document.body.style.overflow
+        const originalBodyOverflow = document.body.style.overflow
+        const originalHtmlOverflow = document.documentElement.style.overflow
+        const originalBodyPaddingRight = document.body.style.paddingRight
+
+        // Evitar salto de layout compensando a largura da barra de scroll
+        const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth
+        if (scrollbarWidth > 0) {
+            document.body.style.paddingRight = `${scrollbarWidth}px`
+        }
+
         document.body.style.overflow = "hidden"
+        document.documentElement.style.overflow = "hidden"
 
         const handleKeyDown = (e) => {
             if (e.key === "Escape") {
@@ -214,10 +227,104 @@ export default function JobApplicationsForm({
 
         window.addEventListener("keydown", handleKeyDown)
         return () => {
-            document.body.style.overflow = originalOverflow
+            document.body.style.overflow = originalBodyOverflow
+            document.documentElement.style.overflow = originalHtmlOverflow
+            document.body.style.paddingRight = originalBodyPaddingRight
             window.removeEventListener("keydown", handleKeyDown)
         }
     }, [isModalActive])
+
+    // Ativação externa do modal (via CustomEvent 'open-job-modal', URL Hash #candidatura, ou clique em links/botões externos)
+    useEffect(() => {
+        const selectVaga = (vagaId, vagaTitle) => {
+            if (vagaId !== undefined && vagaId !== null && String(vagaId).trim() !== "") {
+                const targetStr = String(vagaId).trim()
+                const matched = vagas.find(
+                    (v) => String(v.id) === targetStr || v.documentId === targetStr
+                )
+                if (matched) {
+                    setFormState((prev) => ({
+                        ...prev,
+                        vagas: matched.documentId || String(matched.id),
+                    }))
+                    return
+                }
+                setFormState((prev) => ({ ...prev, vagas: targetStr }))
+                return
+            }
+            if (vagaTitle && vagaTitle.trim() !== "") {
+                const titleLower = vagaTitle.toLowerCase().trim()
+                const matched = vagas.find((v) =>
+                    v.title.toLowerCase().includes(titleLower) || titleLower.includes(v.title.toLowerCase())
+                )
+                if (matched) {
+                    setFormState((prev) => ({
+                        ...prev,
+                        vagas: matched.documentId || String(matched.id),
+                    }))
+                }
+            }
+        }
+
+        const handleOpenEvent = (e) => {
+            setIsOpen(true)
+            setSubmitSuccess(false)
+            setSubmitError(null)
+            const detail = e?.detail || {}
+            selectVaga(detail.vagaId, detail.vagaTitle)
+        }
+
+        const handleHashChange = () => {
+            const hash = window.location.hash
+            if (hash.startsWith("#candidatura") || hash === "#apply" || hash.startsWith("#job-apply")) {
+                setIsOpen(true)
+                setSubmitSuccess(false)
+                setSubmitError(null)
+                const idMatch = hash.match(/#(?:candidatura|job-apply)-(\w+)/)
+                if (idMatch && idMatch[1]) {
+                    selectVaga(idMatch[1])
+                }
+            }
+        }
+
+        const handleGlobalClick = (e) => {
+            const target = e.target
+            if (!target) return
+
+            const trigger = target.closest(
+                'a[href^="#candidatura"], a[href="#apply"], [data-open-job-modal], [data-open-candidatura], .open-job-modal, .open-candidatura-modal'
+            )
+            if (trigger) {
+                e.preventDefault()
+                setIsOpen(true)
+                setSubmitSuccess(false)
+                setSubmitError(null)
+
+                const vagaId = trigger.getAttribute("data-vaga-id") || trigger.getAttribute("data-job-id")
+                const vagaTitle = trigger.getAttribute("data-vaga-title") || trigger.getAttribute("data-job-title")
+                const href = trigger.getAttribute("href") || ""
+                const idFromHref = href.match(/#candidatura-(\w+)/)?.[1]
+
+                selectVaga(vagaId || idFromHref, vagaTitle || undefined)
+            }
+        }
+
+        window.addEventListener("open-job-modal", handleOpenEvent)
+        window.addEventListener("open-job-application-modal", handleOpenEvent)
+        window.addEventListener("hashchange", handleHashChange)
+        document.addEventListener("click", handleGlobalClick)
+
+        if (typeof window !== "undefined" && window.location.hash) {
+            handleHashChange()
+        }
+
+        return () => {
+            window.removeEventListener("open-job-modal", handleOpenEvent)
+            window.removeEventListener("open-job-application-modal", handleOpenEvent)
+            window.removeEventListener("hashchange", handleHashChange)
+            document.removeEventListener("click", handleGlobalClick)
+        }
+    }, [vagas])
 
     const handleOpenModal = () => {
         setIsOpen(true)
@@ -449,15 +556,15 @@ export default function JobApplicationsForm({
                 CV: uploadedFileId,
             }
 
-            // Associar vaga e salvaguardar no campo Obs
+            // Encontrar a vaga selecionada para obter tanto o documentId (Strapi 5) como o id numérico (Strapi 4)
+            let selectedVaga = undefined
             let finalObs = formState.Obs.trim()
-            if (formState.vagas && formState.vagas !== "" && formState.vagas !== "spontaneous") {
-                const numericVagaId = Number(formState.vagas)
-                const vagaVal = isNaN(numericVagaId) ? formState.vagas : numericVagaId
-                candidaturasData.Vagas = vagaVal
 
-                const foundVaga = vagas.find((v) => String(v.id) === String(formState.vagas))
-                const vagaLabel = foundVaga ? foundVaga.title : `Vaga #${formState.vagas}`
+            if (formState.vagas && formState.vagas !== "" && formState.vagas !== "spontaneous") {
+                selectedVaga = vagas.find(
+                    (v) => String(v.documentId) === formState.vagas || String(v.id) === formState.vagas
+                )
+                const vagaLabel = selectedVaga ? selectedVaga.title : `Vaga #${formState.vagas}`
                 finalObs = finalObs
                     ? `[Vaga Pretendida: ${vagaLabel}]\n\n${finalObs}`
                     : `[Vaga Pretendida: ${vagaLabel}]`
@@ -480,35 +587,77 @@ export default function JobApplicationsForm({
                 candidaturasHeaders["Authorization"] = `Bearer ${apiToken.trim()}`
             }
 
-            let response = await fetch(candidaturasEndpoint, {
-                method: "POST",
-                headers: candidaturasHeaders,
-                body: JSON.stringify({ data: candidaturasData }),
-            })
+            // Estratégias adaptativas de associação da relação 'vagas' no Strapi (v4 e v5)
+            const relationStrategies = []
 
-            // Se o schema do Strapi não aceitar a chave 'Vagas', tentar novamente sem ela (o dado já está gravado em Obs)
-            if (!response.ok && candidaturasData.Vagas) {
-                let isInvalidKey = false
-                try {
-                    const clone = response.clone()
-                    const errData = await clone.json()
-                    if (
-                        errData?.error?.message?.includes("Invalid key") ||
-                        errData?.error?.name === "ValidationError"
-                    ) {
-                        isInvalidKey = true
-                    }
-                } catch (_) {}
+            if (selectedVaga || (formState.vagas && formState.vagas !== "" && formState.vagas !== "spontaneous")) {
+                const docId = selectedVaga?.documentId || (typeof formState.vagas === "string" && formState.vagas.length > 10 ? formState.vagas : undefined)
+                const rawNum = selectedVaga?.id ?? Number(formState.vagas)
+                const numId = typeof rawNum === "number" && !isNaN(rawNum) ? rawNum : undefined
 
-                if (isInvalidKey) {
-                    console.warn("[JobApplications-Form] A tentar envio sem campo Vagas no objeto JSON...")
-                    delete candidaturasData.Vagas
-                    response = await fetch(candidaturasEndpoint, {
-                        method: "POST",
-                        headers: candidaturasHeaders,
-                        body: JSON.stringify({ data: candidaturasData }),
-                    })
+                // 1. Strapi 5 (documentId)
+                if (docId) {
+                    relationStrategies.push({ name: "vagas: { connect: [documentId] }", key: "vagas", value: { connect: [docId] } })
+                    relationStrategies.push({ name: "vagas: documentId", key: "vagas", value: docId })
+                    relationStrategies.push({ name: "vagas: [documentId]", key: "vagas", value: [docId] })
+                    relationStrategies.push({ name: "Vagas: { connect: [documentId] }", key: "Vagas", value: { connect: [docId] } })
+                    relationStrategies.push({ name: "Vagas: documentId", key: "Vagas", value: docId })
                 }
+
+                // 2. Strapi 4 / IDs numéricos
+                if (numId !== undefined) {
+                    relationStrategies.push({ name: "vagas: { connect: [id] }", key: "vagas", value: { connect: [numId] } })
+                    relationStrategies.push({ name: "vagas: [id]", key: "vagas", value: [numId] })
+                    relationStrategies.push({ name: "vagas: id", key: "vagas", value: numId })
+                    relationStrategies.push({ name: "Vagas: [id]", key: "Vagas", value: [numId] })
+                    relationStrategies.push({ name: "Vagas: id", key: "Vagas", value: numId })
+                }
+            }
+
+            let response = null
+
+            // Tentar associar a vaga com as estratégias suportadas pelo Strapi
+            if (relationStrategies.length > 0) {
+                for (const strat of relationStrategies) {
+                    const payloadWithRelation = {
+                        ...candidaturasData,
+                        [strat.key]: strat.value,
+                    }
+                    console.log(`[JobApplications-Form] A tentar envio com ${strat.name}:`, strat.value)
+
+                    try {
+                        const res = await fetch(candidaturasEndpoint, {
+                            method: "POST",
+                            headers: candidaturasHeaders,
+                            body: JSON.stringify({ data: payloadWithRelation }),
+                        })
+
+                        if (res.ok) {
+                            response = res
+                            console.log(`[JobApplications-Form] Candidatura criada com sucesso com ${strat.name}!`)
+                            break
+                        } else {
+                            let errJson = null
+                            try {
+                                errJson = await res.clone().json()
+                            } catch (_) {}
+                            const errMsg = errJson?.error?.message || res.statusText
+                            console.warn(`[JobApplications-Form] Formato ${strat.name} recusado (${res.status}): ${errMsg}`)
+                        }
+                    } catch (netErr) {
+                        console.warn(`[JobApplications-Form] Erro de rede com ${strat.name}:`, netErr)
+                    }
+                }
+            }
+
+            // Fallback de salvaguarda: Se as tentativas de relação falharem (ex: falta de permissão RBAC para ligar relations), submeter sem campo de relação (o dado já está preservado em Obs)
+            if (!response || !response.ok) {
+                console.warn("[JobApplications-Form] As tentativas diretas de relação falharam ou não há vaga selecionada. A enviar payload base (com vaga em Obs)...")
+                response = await fetch(candidaturasEndpoint, {
+                    method: "POST",
+                    headers: candidaturasHeaders,
+                    body: JSON.stringify({ data: candidaturasData }),
+                })
             }
 
             console.log("[JobApplications-Form] Resposta HTTP recebida:", response.status, response.statusText)
@@ -633,12 +782,14 @@ export default function JobApplicationsForm({
                     backdrop-filter: blur(8px);
                     -webkit-backdrop-filter: blur(8px);
                     animation: jafFadeIn 0.2s ease-out forwards;
+                    overscroll-behavior: contain;
+                    touch-action: none;
                 }
                 .jaf-modal-dialog {
                     position: relative;
                     width: 100%;
-                    max-width: 680px;
-                    max-height: 90vh;
+                    max-width: ${modalMaxWidth}px;
+                    max-height: 94vh;
                     display: flex;
                     flex-direction: column;
                     background-color: #ffffff;
@@ -648,18 +799,20 @@ export default function JobApplicationsForm({
                     animation: jafSlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
                     font-family: inherit;
                     color: #0f172a;
+                    touch-action: auto;
                 }
                 .jaf-modal-header {
-                    padding: 22px 28px 16px 28px;
+                    padding: 16px 24px 12px 24px;
                     border-bottom: 1px solid #f1f5f9;
                     display: flex;
                     align-items: flex-start;
                     justify-content: space-between;
                     background-color: #ffffff;
+                    flex-shrink: 0;
                 }
                 .jaf-close-btn {
-                    width: 36px;
-                    height: 36px;
+                    width: 32px;
+                    height: 32px;
                     border-radius: 50%;
                     display: flex;
                     align-items: center;
@@ -670,6 +823,7 @@ export default function JobApplicationsForm({
                     cursor: pointer;
                     transition: all 0.2s ease;
                     flex-shrink: 0;
+                    margin-left: 12px;
                 }
                 .jaf-close-btn:hover {
                     background-color: #0f172a;
@@ -677,7 +831,7 @@ export default function JobApplicationsForm({
                     border-color: #0f172a;
                 }
                 .jaf-modal-body {
-                    padding: 24px 28px;
+                    padding: 18px 24px 22px 24px;
                     overflow-y: auto;
                     overscroll-behavior: contain;
                 }
@@ -688,42 +842,58 @@ export default function JobApplicationsForm({
                     background-color: #cbd5e1;
                     border-radius: 3px;
                 }
-                .jaf-grid {
+                .jaf-form-columns {
+                    display: grid;
+                    grid-template-columns: 1.15fr 0.85fr;
+                    gap: 20px;
+                    align-items: start;
+                }
+                .jaf-form-col-left, .jaf-form-col-right {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 10px;
+                }
+                .jaf-subgrid {
                     display: grid;
                     grid-template-columns: 1fr 1fr;
-                    gap: 16px;
+                    gap: 10px;
                 }
-                .jaf-col-full {
-                    grid-column: 1 / -1;
+                .jaf-field-group {
+                    display: flex;
+                    flex-direction: column;
                 }
-                @media (max-width: 600px) {
-                    .jaf-grid {
+                @media (max-width: 768px) {
+                    .jaf-form-columns {
                         grid-template-columns: 1fr;
                         gap: 14px;
                     }
+                    .jaf-subgrid {
+                        grid-template-columns: 1fr;
+                        gap: 10px;
+                    }
                     .jaf-modal-header {
-                        padding: 18px 20px 14px 20px;
+                        padding: 14px 16px 10px 16px;
                     }
                     .jaf-modal-body {
-                        padding: 18px 20px;
+                        padding: 14px 16px 18px 16px;
                     }
                 }
                 .jaf-field-label {
                     display: block;
-                    font-size: 13px;
+                    font-size: 12.5px;
                     font-weight: 600;
                     color: #1e293b;
-                    margin-bottom: 6px;
+                    margin-bottom: 4px;
                     letter-spacing: 0.01em;
                 }
                 .jaf-required-star {
                     color: #ef4444;
-                    margin-left: 3px;
+                    margin-left: 2px;
                 }
                 .jaf-input, .jaf-select, .jaf-textarea {
                     width: 100%;
-                    padding: 11px 13px;
-                    font-size: 14px;
+                    padding: 8.5px 11px;
+                    font-size: 13.5px;
                     color: #0f172a;
                     background-color: #f8fafc;
                     border: 1px solid #e2e8f0;
@@ -742,18 +912,18 @@ export default function JobApplicationsForm({
                     background-color: #fef2f2;
                 }
                 .jaf-error-text {
-                    font-size: 12px;
+                    font-size: 11.5px;
                     color: #ef4444;
-                    margin-top: 4px;
+                    margin-top: 3px;
                     display: flex;
                     align-items: center;
-                    gap: 4px;
+                    gap: 3px;
                 }
                 .jaf-dropzone {
                     border: 2px dashed #cbd5e1;
                     background-color: #f8fafc;
-                    border-radius: 10px;
-                    padding: 22px 16px;
+                    border-radius: 9px;
+                    padding: 13px 12px;
                     text-align: center;
                     cursor: pointer;
                     transition: all 0.2s ease;
@@ -773,32 +943,50 @@ export default function JobApplicationsForm({
                     background-color: #f1f5f9;
                     border: 1px solid #e2e8f0;
                     border-radius: 8px;
-                    padding: 10px 14px;
-                    margin-top: 8px;
+                    padding: 8px 12px;
                 }
                 .jaf-rgpd-container {
                     display: flex;
                     align-items: flex-start;
-                    gap: 12px;
-                    padding: 14px;
+                    gap: 8px;
+                    padding: 8px 10px;
                     background-color: #f8fafc;
                     border-radius: 8px;
                     border: 1px solid #e2e8f0;
                 }
                 .jaf-rgpd-checkbox {
-                    width: 18px;
-                    height: 18px;
+                    width: 15px;
+                    height: 15px;
                     margin-top: 2px;
                     accent-color: ${primaryColor};
                     cursor: pointer;
                     flex-shrink: 0;
                 }
+                .jaf-alert-box {
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 8px;
+                    padding: 8px 10px;
+                    border-radius: 8px;
+                    font-size: 12px;
+                    line-height: 1.35;
+                }
+                .jaf-alert-warning {
+                    background-color: #fffbeb;
+                    border: 1px solid #fde68a;
+                    color: #92400e;
+                }
+                .jaf-alert-danger {
+                    background-color: #fef2f2;
+                    border: 1px solid #fecaca;
+                    color: #991b1b;
+                }
                 .jaf-submit-btn {
                     width: 100%;
-                    padding: 14px 20px;
+                    padding: 11px 16px;
                     background-color: ${primaryColor};
                     color: ${buttonTextColor};
-                    font-size: 15px;
+                    font-size: 14px;
                     font-weight: 600;
                     border: none;
                     border-radius: 8px;
@@ -812,14 +1000,15 @@ export default function JobApplicationsForm({
                 }
                 .jaf-submit-btn:hover:not(:disabled) {
                     opacity: 0.92;
+                    transform: translateY(-1px);
                 }
                 .jaf-submit-btn:disabled {
                     opacity: 0.6;
                     cursor: not-allowed;
                 }
                 .jaf-spinner {
-                    width: 18px;
-                    height: 18px;
+                    width: 16px;
+                    height: 16px;
                     border: 2px solid rgba(255, 255, 255, 0.3);
                     border-top-color: ${buttonTextColor};
                     border-radius: 50%;
@@ -827,31 +1016,33 @@ export default function JobApplicationsForm({
                 }
             `}</style>
 
-            {/* Trigger Button (Abre o Modal) */}
-            <button
-                type="button"
-                className="jaf-btn-trigger"
-                onClick={handleOpenModal}
-                aria-haspopup="dialog"
-                aria-expanded={isModalActive}
-            >
-                <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
+            {/* Trigger Button (Abre o Modal) - Renderizado apenas se showTriggerButton for true */}
+            {showTriggerButton && (
+                <button
+                    type="button"
+                    className="jaf-btn-trigger"
+                    onClick={handleOpenModal}
+                    aria-haspopup="dialog"
+                    aria-expanded={isModalActive}
                 >
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                    <line x1="12" y1="18" x2="12" y2="12" />
-                    <line x1="9" y1="15" x2="15" y2="15" />
-                </svg>
-                <span>{buttonText}</span>
-            </button>
+                    <svg
+                        width="18"
+                        height="18"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                    >
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="12" y1="18" x2="12" y2="12" />
+                        <line x1="9" y1="15" x2="15" y2="15" />
+                    </svg>
+                    <span>{buttonText}</span>
+                </button>
+            )}
 
             {/* Modal Overlay & Pop-up Dialog */}
             {isModalActive && (
@@ -1037,459 +1228,425 @@ export default function JobApplicationsForm({
                             ) : (
                                 /* ESTADO 2: FORMULÁRIO DE CANDIDATURA */
                                 <form onSubmit={handleSubmit} noValidate>
-                                    <div className="jaf-grid">
-                                        {/* Nome (Obrigatório) */}
-                                        <div className="jaf-col-full">
-                                            <label className="jaf-field-label" htmlFor={`nome-${uniqueId}`}>
-                                                Nome Completo
-                                                <span className="jaf-required-star">*</span>
-                                            </label>
-                                            <input
-                                                id={`nome-${uniqueId}`}
-                                                name="Nome"
-                                                type="text"
-                                                className={`jaf-input ${errors.Nome ? "has-error" : ""}`}
-                                                placeholder="ex: João Silva"
-                                                value={formState.Nome}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting}
-                                                required
-                                            />
-                                            {errors.Nome && (
-                                                <div className="jaf-error-text">
-                                                    <span>•</span> {errors.Nome}
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Email (Obrigatório) */}
-                                        <div>
-                                            <label className="jaf-field-label" htmlFor={`email-${uniqueId}`}>
-                                                Email
-                                                <span className="jaf-required-star">*</span>
-                                            </label>
-                                            <input
-                                                id={`email-${uniqueId}`}
-                                                name="Email"
-                                                type="email"
-                                                className={`jaf-input ${errors.Email ? "has-error" : ""}`}
-                                                placeholder="ex: joao.silva@email.com"
-                                                value={formState.Email}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting}
-                                                required
-                                            />
-                                            {errors.Email && (
-                                                <div className="jaf-error-text">
-                                                    <span>•</span> {errors.Email}
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Telefone */}
-                                        <div>
-                                            <label className="jaf-field-label" htmlFor={`tel-${uniqueId}`}>
-                                                Telefone / Telemóvel
-                                            </label>
-                                            <input
-                                                id={`tel-${uniqueId}`}
-                                                name="Telefone"
-                                                type="tel"
-                                                className="jaf-input"
-                                                placeholder="ex: +351 912 345 678"
-                                                value={formState.Telefone}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting}
-                                            />
-                                        </div>
-
-                                        {/* Morada */}
-                                        <div className="jaf-col-full">
-                                            <label className="jaf-field-label" htmlFor={`morada-${uniqueId}`}>
-                                                Morada
-                                            </label>
-                                            <input
-                                                id={`morada-${uniqueId}`}
-                                                name="Morada"
-                                                type="text"
-                                                className="jaf-input"
-                                                placeholder="ex: Rua Principal, nº 123"
-                                                value={formState.Morada}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting}
-                                            />
-                                        </div>
-
-                                        {/* Morada 2 */}
-                                        <div>
-                                            <label className="jaf-field-label" htmlFor={`morada2-${uniqueId}`}>
-                                                Morada 2 (Andar, Porta, etc.)
-                                            </label>
-                                            <input
-                                                id={`morada2-${uniqueId}`}
-                                                name="Morada2"
-                                                type="text"
-                                                className="jaf-input"
-                                                placeholder="ex: 2º Direito"
-                                                value={formState.Morada2}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting}
-                                            />
-                                        </div>
-
-                                        {/* Código Postal */}
-                                        <div>
-                                            <label className="jaf-field-label" htmlFor={`cp-${uniqueId}`}>
-                                                Código Postal
-                                            </label>
-                                            <input
-                                                id={`cp-${uniqueId}`}
-                                                name="CodigoPostal"
-                                                type="text"
-                                                className="jaf-input"
-                                                placeholder="ex: 4750-123"
-                                                value={formState.CodigoPostal}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting}
-                                            />
-                                        </div>
-
-                                        {/* Habilitações Académicas */}
-                                        <div>
-                                            <label className="jaf-field-label" htmlFor={`hab-${uniqueId}`}>
-                                                Habilitações Académicas
-                                            </label>
-                                            <select
-                                                id={`hab-${uniqueId}`}
-                                                name="HabilitacoesAcademicas"
-                                                className="jaf-select"
-                                                value={formState.HabilitacoesAcademicas}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting}
-                                            >
-                                                <option value="">Selecione as habilitações...</option>
-                                                {HABILITACOES_OPTIONS.map((hab) => (
-                                                    <option key={hab} value={hab}>
-                                                        {hab}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-
-                                        {/* Vagas (Select Dinâmico via Strapi) */}
-                                        <div>
-                                            <label className="jaf-field-label" htmlFor={`vaga-${uniqueId}`}>
-                                                Vaga Pretendida
-                                                {isLoadingVagas && (
-                                                    <span style={{ fontSize: "11px", color: "#64748b", marginLeft: "6px" }}>
-                                                        (a carregar...)
-                                                    </span>
-                                                )}
-                                            </label>
-                                            <select
-                                                id={`vaga-${uniqueId}`}
-                                                name="vagas"
-                                                className="jaf-select"
-                                                value={formState.vagas}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting || isLoadingVagas}
-                                            >
-                                                <option value="">Selecione uma vaga ou espontânea...</option>
-                                                <option value="spontaneous">Candidatura Espontânea</option>
-                                                {vagas.map((vaga) => (
-                                                    <option key={vaga.id} value={vaga.id}>
-                                                        {vaga.title}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                            {vagasLoadError && (
-                                                <div style={{ fontSize: "11px", color: "#64748b", marginTop: "3px" }}>
-                                                    A apresentar vagas em modo de contingência.
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Upload do CV (Obrigatório) */}
-                                        <div className="jaf-col-full">
-                                            <label className="jaf-field-label">
-                                                Curriculum Vitae (CV)
-                                                <span className="jaf-required-star">*</span>
-                                                <span style={{ fontSize: "12px", color: "#64748b", fontWeight: 400, marginLeft: "6px" }}>
-                                                    (PDF ou DOCX até 10 MB)
-                                                </span>
-                                            </label>
-
-                                            <input
-                                                ref={fileInputRef}
-                                                type="file"
-                                                accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                                style={{ display: "none" }}
-                                                onChange={handleFileChange}
-                                                disabled={isSubmitting}
-                                            />
-
-                                            {!cvFile ? (
-                                                <div
-                                                    className={`jaf-dropzone ${isDragging ? "is-dragging" : ""} ${
-                                                        errors.CV ? "has-error" : ""
-                                                    }`}
-                                                    onClick={() => fileInputRef.current?.click()}
-                                                    onDrop={handleDrop}
-                                                    onDragOver={handleDragOver}
-                                                    onDragLeave={handleDragLeave}
-                                                >
-                                                    <svg
-                                                        width="32"
-                                                        height="32"
-                                                        viewBox="0 0 24 24"
-                                                        fill="none"
-                                                        stroke="#64748b"
-                                                        strokeWidth="1.75"
-                                                        strokeLinecap="round"
-                                                        strokeLinejoin="round"
-                                                        style={{ margin: "0 auto 8px auto", display: "block" }}
-                                                    >
-                                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                                        <polyline points="17 8 12 3 7 8" />
-                                                        <line x1="12" y1="3" x2="12" y2="15" />
-                                                    </svg>
-                                                    <div style={{ fontSize: "14px", fontWeight: 600, color: "#1e293b" }}>
-                                                        Clique para anexar ou arraste o ficheiro aqui
-                                                    </div>
-                                                    <div style={{ fontSize: "12px", color: "#64748b", marginTop: "2px" }}>
-                                                        Suporta ficheiros .pdf, .doc e .docx
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <div className="jaf-file-card">
-                                                    <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
-                                                        <svg
-                                                            width="24"
-                                                            height="24"
-                                                            viewBox="0 0 24 24"
-                                                            fill="none"
-                                                            stroke={primaryColor}
-                                                            strokeWidth="2"
-                                                            strokeLinecap="round"
-                                                            strokeLinejoin="round"
-                                                            style={{ flexShrink: 0 }}
-                                                        >
-                                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                                            <polyline points="14 2 14 8 20 8" />
-                                                            <line x1="16" y1="13" x2="8" y2="13" />
-                                                            <line x1="16" y1="17" x2="8" y2="17" />
-                                                            <polyline points="10 9 9 9 8 9" />
-                                                        </svg>
-                                                        <div style={{ minWidth: 0 }}>
-                                                            <div
-                                                                style={{
-                                                                    fontSize: "13px",
-                                                                    fontWeight: 600,
-                                                                    color: "#0f172a",
-                                                                    whiteSpace: "nowrap",
-                                                                    overflow: "hidden",
-                                                                    textOverflow: "ellipsis",
-                                                                }}
-                                                            >
-                                                                {cvFile.name}
-                                                            </div>
-                                                            <div style={{ fontSize: "11px", color: "#64748b" }}>
-                                                                {formatFileSize(cvFile.size)}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <button
-                                                        type="button"
-                                                        onClick={handleRemoveFile}
-                                                        style={{
-                                                            border: "none",
-                                                            background: "transparent",
-                                                            color: "#ef4444",
-                                                            cursor: "pointer",
-                                                            padding: "6px",
-                                                            borderRadius: "4px",
-                                                            display: "flex",
-                                                            alignItems: "center",
-                                                            justifyContent: "center",
-                                                        }}
-                                                        title="Remover ficheiro"
-                                                    >
-                                                        <svg
-                                                            width="18"
-                                                            height="18"
-                                                            viewBox="0 0 24 24"
-                                                            fill="none"
-                                                            stroke="currentColor"
-                                                            strokeWidth="2"
-                                                            strokeLinecap="round"
-                                                            strokeLinejoin="round"
-                                                        >
-                                                            <polyline points="3 6 5 6 21 6" />
-                                                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                                                        </svg>
-                                                    </button>
-                                                </div>
-                                            )}
-
-                                            {errors.CV && (
-                                                <div className="jaf-error-text">
-                                                    <span>•</span> {errors.CV}
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Observações / Mensagem */}
-                                        <div className="jaf-col-full">
-                                            <label className="jaf-field-label" htmlFor={`obs-${uniqueId}`}>
-                                                Observações / Carta de Apresentação
-                                            </label>
-                                            <textarea
-                                                id={`obs-${uniqueId}`}
-                                                name="Obs"
-                                                rows={3}
-                                                className="jaf-textarea"
-                                                placeholder="Partilhe alguma informação adicional relevante sobre si..."
-                                                value={formState.Obs}
-                                                onChange={handleInputChange}
-                                                disabled={isSubmitting}
-                                            />
-                                        </div>
-
-                                        {/* Consentimento RGPD (Obrigatório) */}
-                                        <div className="jaf-col-full">
-                                            <div
-                                                className="jaf-rgpd-container"
-                                                style={{
-                                                    borderColor: errors.consentimentoRGPD ? "#ef4444" : "#e2e8f0",
-                                                    backgroundColor: errors.consentimentoRGPD ? "#fef2f2" : "#f8fafc",
-                                                }}
-                                            >
+                                    <div className="jaf-form-columns">
+                                        {/* COLUNA ESQUERDA: Dados do Candidato */}
+                                        <div className="jaf-form-col-left">
+                                            {/* Nome Completo */}
+                                            <div className="jaf-field-group">
+                                                <label className="jaf-field-label" htmlFor={`nome-${uniqueId}`}>
+                                                    Nome Completo <span className="jaf-required-star">*</span>
+                                                </label>
                                                 <input
-                                                    id={`rgpd-${uniqueId}`}
-                                                    name="consentimentoRGPD"
-                                                    type="checkbox"
-                                                    className="jaf-rgpd-checkbox"
-                                                    checked={formState.consentimentoRGPD}
+                                                    id={`nome-${uniqueId}`}
+                                                    name="Nome"
+                                                    type="text"
+                                                    className={`jaf-input ${errors.Nome ? "has-error" : ""}`}
+                                                    placeholder="ex: João Silva"
+                                                    value={formState.Nome}
                                                     onChange={handleInputChange}
                                                     disabled={isSubmitting}
                                                     required
                                                 />
-                                                <label
-                                                    htmlFor={`rgpd-${uniqueId}`}
-                                                    style={{
-                                                        fontSize: "13px",
-                                                        color: "#334155",
-                                                        lineHeight: 1.5,
-                                                        cursor: "pointer",
-                                                    }}
-                                                >
-                                                    Submeto a informação e cedo os meus dados para tratamento
-                                                    consoante a{" "}
-                                                    <a
-                                                        href={privacyPolicyUrl}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        style={{
-                                                            color: primaryColor,
-                                                            textDecoration: "underline",
-                                                            fontWeight: 600,
-                                                        }}
-                                                        onClick={(e) => e.stopPropagation()}
-                                                    >
-                                                        política de privacidade da Impetus
-                                                    </a>
-                                                    .
-                                                    <span className="jaf-required-star">*</span>
-                                                </label>
+                                                {errors.Nome && (
+                                                    <div className="jaf-error-text">
+                                                        <span>•</span> {errors.Nome}
+                                                    </div>
+                                                )}
                                             </div>
-                                            {errors.consentimentoRGPD && (
-                                                <div className="jaf-error-text">
-                                                    <span>•</span> {errors.consentimentoRGPD}
+
+                                            {/* Linha: Email + Telefone */}
+                                            <div className="jaf-subgrid">
+                                                <div className="jaf-field-group">
+                                                    <label className="jaf-field-label" htmlFor={`email-${uniqueId}`}>
+                                                        Email <span className="jaf-required-star">*</span>
+                                                    </label>
+                                                    <input
+                                                        id={`email-${uniqueId}`}
+                                                        name="Email"
+                                                        type="email"
+                                                        className={`jaf-input ${errors.Email ? "has-error" : ""}`}
+                                                        placeholder="ex: joao@email.com"
+                                                        value={formState.Email}
+                                                        onChange={handleInputChange}
+                                                        disabled={isSubmitting}
+                                                        required
+                                                    />
+                                                    {errors.Email && (
+                                                        <div className="jaf-error-text">
+                                                            <span>•</span> {errors.Email}
+                                                        </div>
+                                                    )}
                                                 </div>
-                                            )}
+
+                                                <div className="jaf-field-group">
+                                                    <label className="jaf-field-label" htmlFor={`tel-${uniqueId}`}>
+                                                        Telefone
+                                                    </label>
+                                                    <input
+                                                        id={`tel-${uniqueId}`}
+                                                        name="Telefone"
+                                                        type="tel"
+                                                        className="jaf-input"
+                                                        placeholder="ex: +351 912 345 678"
+                                                        value={formState.Telefone}
+                                                        onChange={handleInputChange}
+                                                        disabled={isSubmitting}
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            {/* Morada */}
+                                            <div className="jaf-field-group">
+                                                <label className="jaf-field-label" htmlFor={`morada-${uniqueId}`}>
+                                                    Morada
+                                                </label>
+                                                <input
+                                                    id={`morada-${uniqueId}`}
+                                                    name="Morada"
+                                                    type="text"
+                                                    className="jaf-input"
+                                                    placeholder="ex: Rua Principal, nº 123"
+                                                    value={formState.Morada}
+                                                    onChange={handleInputChange}
+                                                    disabled={isSubmitting}
+                                                />
+                                            </div>
+
+                                            {/* Linha: Morada 2 + Código Postal */}
+                                            <div className="jaf-subgrid">
+                                                <div className="jaf-field-group">
+                                                    <label className="jaf-field-label" htmlFor={`morada2-${uniqueId}`}>
+                                                        Morada 2 (Andar, etc.)
+                                                    </label>
+                                                    <input
+                                                        id={`morada2-${uniqueId}`}
+                                                        name="Morada2"
+                                                        type="text"
+                                                        className="jaf-input"
+                                                        placeholder="ex: 2º Dto"
+                                                        value={formState.Morada2}
+                                                        onChange={handleInputChange}
+                                                        disabled={isSubmitting}
+                                                    />
+                                                </div>
+
+                                                <div className="jaf-field-group">
+                                                    <label className="jaf-field-label" htmlFor={`cp-${uniqueId}`}>
+                                                        Código Postal
+                                                    </label>
+                                                    <input
+                                                        id={`cp-${uniqueId}`}
+                                                        name="CodigoPostal"
+                                                        type="text"
+                                                        className="jaf-input"
+                                                        placeholder="ex: 4750-123"
+                                                        value={formState.CodigoPostal}
+                                                        onChange={handleInputChange}
+                                                        disabled={isSubmitting}
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            {/* Linha: Habilitações + Vaga Pretendida */}
+                                            <div className="jaf-subgrid">
+                                                <div className="jaf-field-group">
+                                                    <label className="jaf-field-label" htmlFor={`hab-${uniqueId}`}>
+                                                        Habilitações
+                                                    </label>
+                                                    <select
+                                                        id={`hab-${uniqueId}`}
+                                                        name="HabilitacoesAcademicas"
+                                                        className="jaf-select"
+                                                        value={formState.HabilitacoesAcademicas}
+                                                        onChange={handleInputChange}
+                                                        disabled={isSubmitting}
+                                                    >
+                                                        <option value="">Selecione...</option>
+                                                        {HABILITACOES_OPTIONS.map((hab) => (
+                                                            <option key={hab} value={hab}>
+                                                                {hab}
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+
+                                                <div className="jaf-field-group">
+                                                    <label className="jaf-field-label" htmlFor={`vaga-${uniqueId}`}>
+                                                        Vaga Pretendida
+                                                        {isLoadingVagas && (
+                                                            <span style={{ fontSize: "11px", color: "#64748b", marginLeft: "4px" }}>
+                                                                (...)
+                                                            </span>
+                                                        )}
+                                                    </label>
+                                                    <select
+                                                        id={`vaga-${uniqueId}`}
+                                                        name="vagas"
+                                                        className="jaf-select"
+                                                        value={formState.vagas}
+                                                        onChange={handleInputChange}
+                                                        disabled={isSubmitting || isLoadingVagas}
+                                                    >
+                                                        <option value="">Selecione a vaga...</option>
+                                                        <option value="spontaneous">Candidatura Espontânea</option>
+                                                        {vagas.map((vaga) => {
+                                                            const optVal = vaga.documentId || String(vaga.id)
+                                                            return (
+                                                                <option key={optVal} value={optVal}>
+                                                                    {vaga.title}
+                                                                </option>
+                                                            )
+                                                        })}
+                                                    </select>
+                                                </div>
+                                            </div>
                                         </div>
 
-                                        {/* Alertas Imediatos Próximos do Botão */}
-                                        {validationSummary && (
-                                            <div
-                                                className="jaf-col-full"
-                                                style={{
-                                                    display: "flex",
-                                                    alignItems: "flex-start",
-                                                    gap: "10px",
-                                                    padding: "12px 14px",
-                                                    backgroundColor: "#fffbeb",
-                                                    border: "1px solid #fde68a",
-                                                    borderRadius: "8px",
-                                                    color: "#92400e",
-                                                    fontSize: "13px",
-                                                    lineHeight: 1.4,
-                                                    marginTop: "6px",
-                                                }}
-                                            >
-                                                <span style={{ fontSize: "16px", lineHeight: 1 }}>⚠️</span>
-                                                <div>
-                                                    <strong>Atenção:</strong> {validationSummary}
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {submitError && (
-                                            <div
-                                                className="jaf-col-full"
-                                                style={{
-                                                    display: "flex",
-                                                    alignItems: "flex-start",
-                                                    gap: "10px",
-                                                    padding: "12px 14px",
-                                                    backgroundColor: "#fef2f2",
-                                                    border: "1px solid #fecaca",
-                                                    borderRadius: "8px",
-                                                    color: "#991b1b",
-                                                    fontSize: "13px",
-                                                    lineHeight: 1.4,
-                                                    marginTop: "6px",
-                                                }}
-                                            >
-                                                <span style={{ fontSize: "16px", lineHeight: 1 }}>❌</span>
-                                                <div>
-                                                    <strong>Erro no Envio:</strong> {submitError}
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* Botão de Submissão com clique garantido */}
-                                        <div className="jaf-col-full" style={{ marginTop: "12px" }}>
-                                            <button
-                                                type="button"
-                                                onClick={handleSubmit}
-                                                className="jaf-submit-btn"
-                                                disabled={isSubmitting}
-                                            >
-                                                {isSubmitting ? (
-                                                    <>
-                                                        <div className="jaf-spinner" />
-                                                        <span>A submeter candidatura...</span>
-                                                    </>
-                                                ) : (
-                                                    <>
+                                        {/* COLUNA DIREITA: CV, Observações, RGPD e Envio */}
+                                        <div className="jaf-form-col-right">
+                                            {/* Upload do CV */}
+                                            <div className="jaf-field-group">
+                                                <label className="jaf-field-label">
+                                                    Curriculum Vitae (CV) <span className="jaf-required-star">*</span>
+                                                    <span style={{ fontSize: "11px", color: "#64748b", fontWeight: 400, marginLeft: "4px" }}>
+                                                        (PDF/DOCX até 10 MB)
+                                                    </span>
+                                                </label>
+                                                <input
+                                                    ref={fileInputRef}
+                                                    type="file"
+                                                    accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                                    style={{ display: "none" }}
+                                                    onChange={handleFileChange}
+                                                    disabled={isSubmitting}
+                                                />
+                                                {!cvFile ? (
+                                                    <div
+                                                        className={`jaf-dropzone ${isDragging ? "is-dragging" : ""} ${
+                                                            errors.CV ? "has-error" : ""
+                                                        }`}
+                                                        onClick={() => fileInputRef.current?.click()}
+                                                        onDrop={handleDrop}
+                                                        onDragOver={handleDragOver}
+                                                        onDragLeave={handleDragLeave}
+                                                    >
                                                         <svg
-                                                            width="16"
-                                                            height="16"
+                                                            width="22"
+                                                            height="22"
                                                             viewBox="0 0 24 24"
                                                             fill="none"
-                                                            stroke="currentColor"
-                                                            strokeWidth="2.5"
+                                                            stroke="#64748b"
+                                                            strokeWidth="1.75"
                                                             strokeLinecap="round"
                                                             strokeLinejoin="round"
+                                                            style={{ margin: "0 auto 3px auto", display: "block" }}
                                                         >
-                                                            <line x1="22" y1="2" x2="11" y2="13" />
-                                                            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                            <polyline points="17 8 12 3 7 8" />
+                                                            <line x1="12" y1="3" x2="12" y2="15" />
                                                         </svg>
-                                                        <span>{submitButtonText}</span>
-                                                    </>
+                                                        <div style={{ fontSize: "12.5px", fontWeight: 600, color: "#1e293b" }}>
+                                                            Anexar ou arrastar CV
+                                                        </div>
+                                                        <div style={{ fontSize: "11px", color: "#64748b", marginTop: "1px" }}>
+                                                            Ficheiros .pdf, .doc e .docx
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="jaf-file-card">
+                                                        <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+                                                            <svg
+                                                                width="20"
+                                                                height="20"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke={primaryColor}
+                                                                strokeWidth="2"
+                                                                strokeLinecap="round"
+                                                                strokeLinejoin="round"
+                                                                style={{ flexShrink: 0 }}
+                                                            >
+                                                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                                                <polyline points="14 2 14 8 20 8" />
+                                                                <line x1="16" y1="13" x2="8" y2="13" />
+                                                                <line x1="16" y1="17" x2="8" y2="17" />
+                                                                <polyline points="10 9 9 9 8 9" />
+                                                            </svg>
+                                                            <div style={{ minWidth: 0 }}>
+                                                                <div
+                                                                    style={{
+                                                                        fontSize: "12.5px",
+                                                                        fontWeight: 600,
+                                                                        color: "#0f172a",
+                                                                        whiteSpace: "nowrap",
+                                                                        overflow: "hidden",
+                                                                        textOverflow: "ellipsis",
+                                                                        maxWidth: "200px",
+                                                                    }}
+                                                                >
+                                                                    {cvFile.name}
+                                                                </div>
+                                                                <div style={{ fontSize: "11px", color: "#64748b" }}>
+                                                                    {formatFileSize(cvFile.size)}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleRemoveFile}
+                                                            style={{
+                                                                border: "none",
+                                                                background: "transparent",
+                                                                color: "#ef4444",
+                                                                cursor: "pointer",
+                                                                padding: "4px",
+                                                                borderRadius: "4px",
+                                                                display: "flex",
+                                                                alignItems: "center",
+                                                                justifyContent: "center",
+                                                            }}
+                                                            title="Remover ficheiro"
+                                                        >
+                                                            <svg
+                                                                width="16"
+                                                                height="16"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke="currentColor"
+                                                                strokeWidth="2"
+                                                                strokeLinecap="round"
+                                                                strokeLinejoin="round"
+                                                            >
+                                                                <polyline points="3 6 5 6 21 6" />
+                                                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                                                            </svg>
+                                                        </button>
+                                                    </div>
                                                 )}
-                                            </button>
+                                                {errors.CV && (
+                                                    <div className="jaf-error-text">
+                                                        <span>•</span> {errors.CV}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* Observações / Mensagem */}
+                                            <div className="jaf-field-group">
+                                                <label className="jaf-field-label" htmlFor={`obs-${uniqueId}`}>
+                                                    Observações / Apresentação
+                                                </label>
+                                                <textarea
+                                                    id={`obs-${uniqueId}`}
+                                                    name="Obs"
+                                                    rows={2}
+                                                    className="jaf-textarea"
+                                                    placeholder="Informação adicional relevante sobre si..."
+                                                    value={formState.Obs}
+                                                    onChange={handleInputChange}
+                                                    disabled={isSubmitting}
+                                                    style={{ minHeight: "54px", resize: "vertical" }}
+                                                />
+                                            </div>
+
+                                            {/* Consentimento RGPD */}
+                                            <div className="jaf-field-group">
+                                                <div
+                                                    className="jaf-rgpd-container"
+                                                    style={{
+                                                        borderColor: errors.consentimentoRGPD ? "#ef4444" : "#e2e8f0",
+                                                        backgroundColor: errors.consentimentoRGPD ? "#fef2f2" : "#f8fafc",
+                                                    }}
+                                                >
+                                                    <input
+                                                        id={`rgpd-${uniqueId}`}
+                                                        name="consentimentoRGPD"
+                                                        type="checkbox"
+                                                        className="jaf-rgpd-checkbox"
+                                                        checked={formState.consentimentoRGPD}
+                                                        onChange={handleInputChange}
+                                                        disabled={isSubmitting}
+                                                        required
+                                                    />
+                                                    <label
+                                                        htmlFor={`rgpd-${uniqueId}`}
+                                                        style={{
+                                                            fontSize: "12px",
+                                                            color: "#334155",
+                                                            lineHeight: 1.35,
+                                                            cursor: "pointer",
+                                                        }}
+                                                    >
+                                                        Submeto a informação e autorizo o tratamento consoante a{" "}
+                                                        <a
+                                                            href={privacyPolicyUrl}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            style={{
+                                                                color: primaryColor,
+                                                                textDecoration: "underline",
+                                                                fontWeight: 600,
+                                                            }}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            política de privacidade
+                                                        </a>
+                                                        .<span className="jaf-required-star">*</span>
+                                                    </label>
+                                                </div>
+                                                {errors.consentimentoRGPD && (
+                                                    <div className="jaf-error-text">
+                                                        <span>•</span> {errors.consentimentoRGPD}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* Alertas Imediatos */}
+                                            {validationSummary && (
+                                                <div className="jaf-alert-box jaf-alert-warning">
+                                                    <span style={{ fontSize: "14px", lineHeight: 1 }}>⚠️</span>
+                                                    <div>{validationSummary}</div>
+                                                </div>
+                                            )}
+                                            {submitError && (
+                                                <div className="jaf-alert-box jaf-alert-danger">
+                                                    <span style={{ fontSize: "14px", lineHeight: 1 }}>❌</span>
+                                                    <div>{submitError}</div>
+                                                </div>
+                                            )}
+
+                                            {/* Botão de Envio */}
+                                            <div style={{ marginTop: "4px" }}>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleSubmit}
+                                                    className="jaf-submit-btn"
+                                                    disabled={isSubmitting}
+                                                >
+                                                    {isSubmitting ? (
+                                                        <>
+                                                            <div className="jaf-spinner" />
+                                                            <span>A submeter candidatura...</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <svg
+                                                                width="15"
+                                                                height="15"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke="currentColor"
+                                                                strokeWidth="2.5"
+                                                                strokeLinecap="round"
+                                                                strokeLinejoin="round"
+                                                            >
+                                                                <line x1="22" y1="2" x2="11" y2="13" />
+                                                                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                                                            </svg>
+                                                            <span>{submitButtonText}</span>
+                                                        </>
+                                                    )}
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 </form>
@@ -1519,17 +1676,33 @@ addPropertyControls(JobApplicationsForm, {
         defaultValue: "",
         description: "Bearer Token para endpoints protegidos no Strapi",
     },
+    showTriggerButton: {
+        type: ControlType.Boolean,
+        title: "Show Default Button",
+        defaultValue: true,
+        description: "Ativar para exibir o botão 'Candidatar-me'. Se desativado, o modal abre por CTAs externos.",
+    },
     buttonText: {
         type: ControlType.String,
         title: "Button Text",
         defaultValue: "Candidatar-me",
-        description: "Texto do botão que dispara a abertura do modal",
+        description: "Texto do botão padrão que dispara a abertura do modal",
     },
     previewOpen: {
         type: ControlType.Boolean,
         title: "Preview Modal",
         defaultValue: false,
         description: "Ativar para pré-visualizar o modal diretamente na tela do Framer",
+    },
+    modalMaxWidth: {
+        type: ControlType.Number,
+        title: "Modal Width",
+        defaultValue: 880,
+        min: 600,
+        max: 1200,
+        step: 20,
+        unit: "px",
+        description: "Largura máxima do modal em desktop (evita scroll vertical)",
     },
     modalTitle: {
         type: ControlType.String,
